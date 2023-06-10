@@ -1,6 +1,6 @@
 # Apple Homebrew Tap
 
-This repository contains formulae for use with Homebrew: https://brew.sh
+This repository contains formulae for use with Homebrew: https://brew.sh.
 
 ## Special Instructions
 

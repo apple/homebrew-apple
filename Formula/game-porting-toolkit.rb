@@ -25,7 +25,7 @@ class TarballDownloadStrategy < CurlDownloadStrategy
 end
 
 class GamePortingToolkit < Formula
-  version "1.0"
+  version "1.0.2"
   desc "Apple Game Porting Toolkit"
   homepage "https://developer.apple.com/"
   url "https://media.codeweavers.com/pub/crossover/source/crossover-sources-22.1.1.tar.gz", using: TarballDownloadStrategy
@@ -144,6 +144,17 @@ class GamePortingToolkit < Formula
       system "make", "install"
     end
   end
+
+  def post_install
+     #Homebrew replaces wine's rpath names with absolute paths, we need to change them back to @rpath relative paths. 
+     #Wine relies on @rpath names to cause dlopen to always return the first dylib with that name loaded into the process rather than the actual dylib found using rpath lookup.
+     Dir["#{lib}/wine/{x86_64-unix,x86_32on64-unix}/*.so"].each do |dylib|
+       chmod 0664, dylib
+       MachO::Tools.change_dylib_id(dylib, "@rpath/#{File.basename(dylib)}")
+       MachO.codesign!(dylib)
+       chmod 0444, dylib
+     end
+   end
 
   def caveats
     return unless latest_version_installed?
@@ -88211,6 +88222,311 @@ index 1a7005bde3c..d07da38bb16 100644
 -- 
 2.39.2 (Apple Git-144)
 
+diff --git a/dlls/mfreadwrite/reader.c b/dlls/mfreadwrite/reader.c
+index e7b7b55..ea0058b 100644
+--- wine/dlls/mfreadwrite/reader.c
++++ wine/dlls/mfreadwrite/reader.c
+@@ -2472,6 +2472,92 @@ failed:
+     return hr;
+ }
+ 
++static HRESULT bytestream_get_url_hint(IMFByteStream *stream, WCHAR const **url)
++{
++    static const unsigned char asfmagic[]  = {0x30,0x26,0xb2,0x75,0x8e,0x66,0xcf,0x11,0xa6,0xd9,0x00,0xaa,0x00,0x62,0xce,0x6c};
++    static const unsigned char wavmagic[]  = { 'R', 'I', 'F', 'F',0x00,0x00,0x00,0x00, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' '};
++    static const unsigned char wavmask[]   = {0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff};
++    static const unsigned char isommagic[] = {0x00,0x00,0x00,0x00, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm',0x00,0x00,0x00,0x00};
++    static const unsigned char mp4_magic[] = {0x00,0x00,0x00,0x00, 'f', 't', 'y', 'p', 'M', 'S', 'N', 'V',0x00,0x00,0x00,0x00};
++    static const unsigned char mp42magic[] = {0x00,0x00,0x00,0x00, 'f', 't', 'y', 'p', 'm', 'p', '4', '2',0x00,0x00,0x00,0x00};
++    static const unsigned char mp4vmagic[] = {0x00,0x00,0x00,0x00, 'f', 't', 'y', 'p', 'M', '4', 'V', ' ',0x00,0x00,0x00,0x00};
++    static const unsigned char mp4mask[]   = {0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x00,0x00};
++    static const struct stream_content_url_hint
++    {
++        const unsigned char *magic;
++        const WCHAR *url;
++        const unsigned char *mask;
++    }
++    url_hints[] =
++    {
++        { asfmagic,  L".asf" },
++        { wavmagic,  L".wav", wavmask },
++        { isommagic, L".mp4", mp4mask },
++        { mp42magic, L".mp4", mp4mask },
++        { mp4_magic, L".mp4", mp4mask },
++        { mp4vmagic, L".m4v", mp4mask },
++    };
++    unsigned char buffer[4 * sizeof(unsigned int)], pattern[4 * sizeof(unsigned int)];
++    unsigned int i, j, length = 0, caps = 0;
++    IMFAttributes *attributes;
++    QWORD position;
++    HRESULT hr;
++
++    *url = NULL;
++
++    if (SUCCEEDED(IMFByteStream_QueryInterface(stream, &IID_IMFAttributes, (void **)&attributes)))
++    {
++        IMFAttributes_GetStringLength(attributes, &MF_BYTESTREAM_CONTENT_TYPE, &length);
++        IMFAttributes_Release(attributes);
++    }
++
++    if (length)
++        return S_OK;
++
++    if (FAILED(hr = IMFByteStream_GetCapabilities(stream, &caps)))
++        return hr;
++
++    if (!(caps & MFBYTESTREAM_IS_SEEKABLE))
++        return S_OK;
++
++    if (FAILED(hr = IMFByteStream_GetCurrentPosition(stream, &position)))
++        return hr;
++
++    hr = IMFByteStream_Read(stream, buffer, sizeof(buffer), &length);
++    IMFByteStream_SetCurrentPosition(stream, position);
++    if (FAILED(hr))
++        return hr;
++
++    if (length < sizeof(buffer))
++        return S_OK;
++
++    for (i = 0; i < ARRAY_SIZE(url_hints); ++i)
++    {
++        memcpy(pattern, buffer, sizeof(buffer));
++        if (url_hints[i].mask)
++        {
++            unsigned int *mask = (unsigned int *)url_hints[i].mask;
++            unsigned int *data = (unsigned int *)pattern;
++
++            for (j = 0; j < sizeof(buffer) / sizeof(unsigned int); ++j)
++                data[j] &= mask[j];
++
++        }
++        if (!memcmp(pattern, url_hints[i].magic, sizeof(pattern)))
++        {
++            *url = url_hints[i].url;
++            break;
++        }
++    }
++
++    if (*url)
++        TRACE("Stream type guessed as %s from %s.\n", debugstr_w(*url), debugstr_an((char *)buffer, length));
++    else
++        WARN("Unrecognized content type %s.\n", debugstr_an((char *)buffer, length));
++
++    return S_OK;
++}
++
+ static HRESULT create_source_reader_from_stream(IMFByteStream *stream, IMFAttributes *attributes,
+         REFIID riid, void **out)
+ {
+@@ -2479,8 +2565,13 @@ static HRESULT create_source_reader_from_stream(IMFByteStream *stream, IMFAttrib
+     IMFSourceResolver *resolver;
+     MF_OBJECT_TYPE obj_type;
+     IMFMediaSource *source;
++    const WCHAR *url;
+     HRESULT hr;
+ 
++    /* If stream does not have content type set, try to guess from starting byte sequence. */
++    if (FAILED(hr = bytestream_get_url_hint(stream, &url)))
++        return hr;
++
+     if (FAILED(hr = MFCreateSourceResolver(&resolver)))
+         return hr;
+ 
+@@ -2488,7 +2579,7 @@ static HRESULT create_source_reader_from_stream(IMFByteStream *stream, IMFAttrib
+         IMFAttributes_GetUnknown(attributes, &MF_SOURCE_READER_MEDIASOURCE_CONFIG, &IID_IPropertyStore,
+                 (void **)&props);
+ 
+-    hr = IMFSourceResolver_CreateObjectFromByteStream(resolver, stream, NULL, MF_RESOLUTION_MEDIASOURCE
++    hr = IMFSourceResolver_CreateObjectFromByteStream(resolver, stream, url, MF_RESOLUTION_MEDIASOURCE
+             | MF_RESOLUTION_CONTENT_DOES_NOT_HAVE_TO_MATCH_EXTENSION_OR_MIME_TYPE, props, &obj_type, (IUnknown **)&source);
+     IMFSourceResolver_Release(resolver);
+     if (props)
+diff --git a/include/wine/strmbase.h b/include/wine/strmbase.h
+index 319717e..02cd1c5 100644
+--- wine/include/wine/strmbase.h
++++ wine/include/wine/strmbase.h
+@@ -38,7 +38,6 @@ struct strmbase_pin
+     struct strmbase_filter *filter;
+     PIN_DIRECTION dir;
+     WCHAR name[128];
+-    WCHAR id[128];
+     IPin *peer;
+     AM_MEDIA_TYPE mt;
+ 
+@@ -108,6 +107,8 @@ struct strmbase_sink_ops
+ };
+ 
+ /* Base Pin */
++HRESULT WINAPI BaseOutputPinImpl_GetDeliveryBuffer(struct strmbase_source *pin, IMediaSample **sample, REFERENCE_TIME *start, REFERENCE_TIME *stop, DWORD flags);
++HRESULT WINAPI BaseOutputPinImpl_InitAllocator(struct strmbase_source *pin, IMemAllocator **allocator);
+ HRESULT WINAPI BaseOutputPinImpl_DecideAllocator(struct strmbase_source *pin, IMemInputPin *peer, IMemAllocator **allocator);
+ HRESULT WINAPI BaseOutputPinImpl_AttemptConnection(struct strmbase_source *pin, IPin *peer, const AM_MEDIA_TYPE *mt);
+ 
+-- 
+2.39.2 (Apple Git-144)
+
+diff --git a/dlls/kernel32/kernel32.spec b/dlls/kernel32/kernel32.spec
+index 51a14338..3626c740 100644
+--- wine/dlls/kernel32/kernel32.spec
++++ wine/dlls/kernel32/kernel32.spec
+@@ -370,6 +370,7 @@
+ @ stdcall -import DeleteProcThreadAttributeList(ptr)
+ # @ stub DisableThreadProfiling
+ @ stdcall DisassociateCurrentThreadFromCallback(ptr) NTDLL.TpDisassociateCallback
++@ stdcall DiscardVirtualMemory(ptr long) kernelbase.DiscardVirtualMemory
+ @ stdcall DeleteTimerQueue(long)
+ @ stdcall -import DeleteTimerQueueEx(long long)
+ @ stdcall -import DeleteTimerQueueTimer(long long long)
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index 3fb2192b..ae6bc842 100644
+--- wine/dlls/kernelbase/kernelbase.spec
++++ wine/dlls/kernelbase/kernelbase.spec
+@@ -269,7 +269,7 @@
+ @ stdcall DisablePredefinedHandleTableInternal(long)
+ @ stdcall DisableThreadLibraryCalls(long)
+ @ stdcall DisassociateCurrentThreadFromCallback(ptr) ntdll.TpDisassociateCallback
+-# @ stub DiscardVirtualMemory
++@ stdcall DiscardVirtualMemory(ptr long)
+ @ stdcall DisconnectNamedPipe(long)
+ @ stdcall DnsHostnameToComputerNameExW(wstr ptr ptr)
+ # @ stub DsBindWithSpnExW
+@@ -1247,7 +1247,7 @@
+ @ stdcall QueryThreadpoolStackInformation(ptr ptr)
+ @ stdcall QueryUnbiasedInterruptTime(ptr) ntdll.RtlQueryUnbiasedInterruptTime
+ # @ stub QueryUnbiasedInterruptTimePrecise
+-# @ stub QueryVirtualMemoryInformation
++@ stdcall QueryVirtualMemoryInformation(long ptr long ptr long ptr)
+ @ stdcall QueryWorkingSet(long ptr long)
+ @ stdcall QueryWorkingSetEx(long ptr long)
+ @ stdcall QueueUserAPC(ptr long long)
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index e5ad1e5a..83a40a7c 100644
+--- wine/dlls/kernelbase/memory.c
++++ wine/dlls/kernelbase/memory.c
+@@ -49,6 +49,19 @@ WINE_DECLARE_DEBUG_CHANNEL(globalmem);
+  ***********************************************************************/
+ 
+ 
++/***********************************************************************
++ *             DiscardVirtualMemory   (kernelbase.@)
++ */
++DWORD WINAPI DECLSPEC_HOTPATCH DiscardVirtualMemory( void *addr, SIZE_T size )
++{
++    NTSTATUS status;
++    LPVOID ret = addr;
++
++    status = NtAllocateVirtualMemory( GetCurrentProcess(), &ret, 0, &size, MEM_RESET, PAGE_NOACCESS );
++    return RtlNtStatusToDosError( status );
++}
++
++
+ /***********************************************************************
+  *             FlushViewOfFile   (kernelbase.@)
+  */
+@@ -1286,6 +1299,23 @@ LPVOID WINAPI DECLSPEC_HOTPATCH VirtualAllocExNuma( HANDLE process, void *addr,
+ }
+ 
+ 
++/***********************************************************************
++ *             QueryVirtualMemoryInformation   (kernelbase.@)
++ */
++BOOL WINAPI DECLSPEC_HOTPATCH QueryVirtualMemoryInformation( HANDLE process, const void *addr,
++        WIN32_MEMORY_INFORMATION_CLASS info_class, void *info, SIZE_T size, SIZE_T *ret_size)
++{
++    switch (info_class)
++    {
++        case MemoryRegionInfo:
++            return set_ntstatus( NtQueryVirtualMemory( process, addr, MemoryRegionInformation, info, size, ret_size ));
++        default:
++            FIXME("Unsupported info class %u.\n", info_class);
++            return FALSE;
++    }
++}
++
++
+ /***********************************************************************
+  * CPU functions
+  ***********************************************************************/
+diff --git a/include/Makefile.in b/include/Makefile.in
+index f262c7a9..8cf0db6d 100644
+--- wine/include/Makefile.in
++++ wine/include/Makefile.in
+@@ -413,6 +413,7 @@ SOURCES = \
+ 	mcx.h \
+ 	mediaerr.h \
+ 	mediaobj.idl \
++	memoryapi.h \
+ 	metahost.idl \
+ 	mfapi.h \
+ 	mfd3d12.idl \
+diff --git a/include/memoryapi.h b/include/memoryapi.h
+new file mode 100644
+index 00000000..6728b832
+--- /dev/null
++++ wine/include/memoryapi.h
+@@ -0,0 +1,46 @@
++/*
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++typedef enum WIN32_MEMORY_INFORMATION_CLASS
++{
++    MemoryRegionInfo
++} WIN32_MEMORY_INFORMATION_CLASS;
++
++typedef struct WIN32_MEMORY_REGION_INFORMATION
++{
++    PVOID AllocationBase;
++    ULONG AllocationProtect;
++    union
++    {
++        ULONG Flags;
++        struct
++        {
++            ULONG Private : 1;
++            ULONG MappedDataFile : 1;
++            ULONG MappedImage : 1;
++            ULONG MappedPageFile : 1;
++            ULONG MappedPhysical : 1;
++            ULONG DirectMapped : 1;
++            ULONG Reserved : 26;
++        } DUMMYSTRUCTNAME;
++    } DUMMYUNIONNAME;
++    SIZE_T RegionSize;
++    SIZE_T CommitSize;
++} WIN32_MEMORY_REGION_INFORMATION;
++
++DWORD WINAPI DiscardVirtualMemory(void *addr, SIZE_T size);
++BOOL WINAPI QueryVirtualMemoryInformation(HANDLE process,const void *addr,
++        WIN32_MEMORY_INFORMATION_CLASS info_class, void *info, SIZE_T size, SIZE_T *ret_size);
+diff --git a/include/winbase.h b/include/winbase.h
+index c8c893d8..55a5c59c 100644
+--- wine/include/winbase.h
++++ wine/include/winbase.h
+@@ -45,6 +45,7 @@ extern "C" {
+ #include <processthreadsapi.h>
+ #include <synchapi.h>
+ #include <threadpoolapiset.h>
++#include <memoryapi.h>
+ 
+   /* Windows Exit Procedure flag values */
+ #define	WEP_FREE_DLL        0
+-- 
+2.39.2 (Apple Git-144)
+
 diff --git a/dlls/winemac.drv/macdrv_main.c b/dlls/winemac.drv/macdrv_main.c
 index 50e926c6aaa..35f0c3e9204 100644
 --- wine/dlls/winemac.drv/macdrv_main.c
@@ -88690,3 +89006,455 @@ index cb184431..1ea1a3b4 100644
  };
  
  #endif /* __NTDLL_UNIXLIB_H */
+diff --git a/dlls/atiadlxx/atiadlxx.spec b/dlls/atiadlxx/atiadlxx.spec
+index 80efd6ee..752e805a 100644
+--- wine/dlls/atiadlxx/atiadlxx.spec
++++ wine/dlls/atiadlxx/atiadlxx.spec
+@@ -94,7 +94,7 @@
+ @ stub ADL2_Adapter_MVPU_Set
+ @ stub ADL2_Adapter_MaxCursorSize_Get
+ @ stub ADL2_Adapter_MemoryInfo2_Get
+-@ stub ADL2_Adapter_MemoryInfo_Get
++@ stdcall ADL2_Adapter_MemoryInfo_Get(ptr long ptr)
+ @ stub ADL2_Adapter_MirabilisSupport_Get
+ @ stub ADL2_Adapter_ModeSwitch
+ @ stub ADL2_Adapter_ModeTimingOverride_Caps
+@@ -249,7 +249,7 @@
+ @ stub ADL2_Display_DCE_Get
+ @ stub ADL2_Display_DCE_Set
+ @ stub ADL2_Display_DDCBlockAccess_Get
+-@ stub ADL2_Display_DDCInfo2_Get
++@ stdcall ADL2_Display_DDCInfo2_Get(ptr long long ptr)
+ @ stub ADL2_Display_DDCInfo_Get
+ @ stub ADL2_Display_Deflicker_Get
+ @ stub ADL2_Display_Deflicker_Set
+@@ -257,9 +257,9 @@
+ @ stub ADL2_Display_DisplayContent_Cap
+ @ stub ADL2_Display_DisplayContent_Get
+ @ stub ADL2_Display_DisplayContent_Set
+-@ stub ADL2_Display_DisplayInfo_Get
++@ stdcall ADL2_Display_DisplayInfo_Get(ptr long ptr ptr long)
+ @ stub ADL2_Display_DisplayMapConfigX2_Set
+-@ stub ADL2_Display_DisplayMapConfig_Get
++@ stdcall ADL2_Display_DisplayMapConfig_Get(ptr long ptr ptr ptr ptr long)
+ @ stub ADL2_Display_DisplayMapConfig_PossibleAddAndRemove
+ @ stub ADL2_Display_DisplayMapConfig_Set
+ @ stub ADL2_Display_DisplayMapConfig_Validate
+@@ -281,7 +281,7 @@
+ @ stub ADL2_Display_FormatsOverride_Set
+ @ stub ADL2_Display_FreeSyncState_Get
+ @ stub ADL2_Display_FreeSyncState_Set
+-@ stub ADL2_Display_FreeSync_Cap
++@ stdcall ADL2_Display_FreeSync_Cap(ptr long long ptr)
+ @ stub ADL2_Display_GamutMapping_Get
+ @ stub ADL2_Display_GamutMapping_Reset
+ @ stub ADL2_Display_GamutMapping_Set
+@@ -315,7 +315,7 @@
+ @ stub ADL2_Display_ModeTimingOverride_Delete
+ @ stub ADL2_Display_ModeTimingOverride_Get
+ @ stub ADL2_Display_ModeTimingOverride_Set
+-@ stub ADL2_Display_Modes_Get
++@ stdcall ADL2_Display_Modes_Get(ptr long long ptr ptr)
+ @ stub ADL2_Display_Modes_Set
+ @ stub ADL2_Display_Modes_X2_Get
+ @ stub ADL2_Display_MonitorPowerState_Set
+@@ -744,7 +744,7 @@
+ @ stub ADL_Adapter_NumberOfActivatableSources_Get
+ @ stdcall ADL_Adapter_NumberOfAdapters_Get(ptr)
+ @ stdcall ADL_Adapter_ObservedClockInfo_Get(long ptr ptr)
+-@ stub ADL_Adapter_ObservedGameClockInfo_Get
++@ stdcall ADL_Adapter_ObservedGameClockInfo_Get(ptr long ptr ptr ptr ptr)
+ @ stdcall ADL_Adapter_Primary_Get(long)
+ @ stub ADL_Adapter_Primary_Set
+ @ stub ADL_Adapter_RegValueInt_Get
+diff --git a/dlls/atiadlxx/atiadlxx_main.c b/dlls/atiadlxx/atiadlxx_main.c
+index 9b35cac4..3018336c 100644
+--- wine/dlls/atiadlxx/atiadlxx_main.c
++++ wine/dlls/atiadlxx/atiadlxx_main.c
+@@ -63,6 +63,14 @@ typedef void *ADL_CONTEXT_HANDLE;
+ ADL_MAIN_MALLOC_CALLBACK adl_malloc;
+ #define ADL_MAX_PATH 256
+ 
++typedef struct ADLDDCInfo2 {
++
++} ADLDDCInfo2;
++
++typedef struct ADLFreeSyncCap {
++
++} ADLFreeSyncCap;
++
+ typedef struct ADLVersionsInfo
+ {
+     char strDriverVer[ADL_MAX_PATH];
+@@ -325,15 +333,15 @@ int WINAPI ADL2_Display_EdidData_Get(int adapter_index, int display_index, void*
+ 
+ int WINAPI ADL2_Adapter_AdapterInfoX2_Get(ADL_CONTEXT_HANDLE* ptr, ADLAdapterInfo **adapters)
+ {
+-    TRACE("\n");
++    FIXME("stub!\n");
+     *adapters = (ADLAdapterInfo*)adl_malloc(sizeof(ADLAdapterInfo) * 1);
+     return ADL_Adapter_AdapterInfo_Get(*adapters, sizeof(ADLAdapterInfo) * 1);
+ }
+ 
+ int WINAPI ADL2_Adapter_AdapterInfo_Get(ADL_CONTEXT_HANDLE* ptr, ADLAdapterInfo *adapters, int bufferSize)
+ {
+-    TRACE("\n");
+     ADLAdapterInfo adapterInfo;
++    TRACE("stub!");
+     ADL_Adapter_AdapterInfo_Get(&adapterInfo, sizeof(ADLAdapterInfo));
+     if (bufferSize <= sizeof(ADLAdapterInfo))
+     {
+@@ -346,7 +354,7 @@ int WINAPI ADL2_Adapter_AdapterInfo_Get(ADL_CONTEXT_HANDLE* ptr, ADLAdapterInfo
+ 
+ int WINAPI ADL_Adapter_AdapterInfo_Get(ADLAdapterInfo *adapters, int input_size)
+ {
+-    int count, i;
++    int count, i, j;
+     DXGI_ADAPTER_DESC adapter_desc;
+ 
+     FIXME("adapters %p, input_size %d, stub!\n", adapters, input_size);
+@@ -362,11 +370,18 @@ int WINAPI ADL_Adapter_AdapterInfo_Get(ADLAdapterInfo *adapters, int input_size)
+     {
+         adapters[i].iSize = sizeof(ADLAdapterInfo);
+         adapters[i].iAdapterIndex = i;
+ 
+         if (get_adapter_desc(i, &adapter_desc) != ADL_OK)
+             return ADL_ERR;
+ 
+         adapters[i].iVendorID = convert_vendor_id(adapter_desc.VendorId);
++
++        for (j = 0; j < 128; ++j)
++        {
++            adapters[i].strAdapterName[j] = (char)adapter_desc.Description[j];
++            if (adapters[i].strAdapterName[j] == 0)
++               break;
++        }
+     }
+ 
+     return ADL_OK;
+@@ -411,6 +434,12 @@ int WINAPI ADL_Display_DisplayInfo_Get(int adapter_index, int *num_displays, ADL
+     return ADL_OK;
+ }
+ 
++int WINAPI ADL2_Display_DisplayInfo_Get(ADL_CONTEXT_HANDLE context, int adapter_index, int *num_displays, ADLDisplayInfo **info, int force_detect)
++{
++    FIXME("adapter: %d, stub!\n", adapter_index);
++    return ADL_Display_DisplayInfo_Get(adapter_index, num_displays, info, force_detect);    
++}
++
+ int WINAPI ADL_Adapter_Crossfire_Caps(int adapter_index, int *preffered, int *num_comb, ADLCrossfireComb** comb)
+ {
+     FIXME("adapter %d, preffered %p, num_comb %p, comb %p stub!\n", adapter_index, preffered, num_comb, comb);
+@@ -501,6 +530,23 @@ int WINAPI ADL_Adapter_ObservedClockInfo_Get(int adapter_index, int *core_clock,
+     return ADL_OK;
+ }
+ 
++int WINAPI ADL_Adapter_ObservedGameClockInfo_Get(ADL_CONTEXT_HANDLE context, int adapter_index, int* base_clock, int* game_clock, int* boost_clock, int* memory_clock)
++{
++    int retStatus;
++    FIXME("adapter: %d, stub!\n", adapter_index);
++    retStatus = ADL_Adapter_ObservedClockInfo_Get(adapter_index, base_clock, memory_clock);
++    if (retStatus == ADL_OK)
++    {
++        *game_clock = *base_clock;
++        *boost_clock = *base_clock;
++
++        TRACE("*base_clock: %i, *game_clock: %i, *boost_clock: %i, *memory_clock: %i\n", 
++                *base_clock, *game_clock, *boost_clock, *memory_clock);
++    }
++    return retStatus;
++}
++
++
+ /* documented in the "Linux Specific APIs" section, present and used on Windows */
+ int WINAPI ADL_Adapter_MemoryInfo_Get(int adapter_index, ADLMemoryInfo *mem_info)
+ {
+@@ -521,6 +567,12 @@ int WINAPI ADL_Adapter_MemoryInfo_Get(int adapter_index, ADLMemoryInfo *mem_info
+     return ADL_OK;
+ }
+ 
++int WINAPI ADL2_Adapter_MemoryInfo_Get(ADL_CONTEXT_HANDLE context, int adapter_index, ADLMemoryInfo *mem_info)
++{
++    FIXME("adapter %d, stub!\n", adapter_index);
++    return ADL_Adapter_MemoryInfo_Get(adapter_index, mem_info);
++}
++
+ int WINAPI ADL_Adapter_Primary_Get(int* adapter_index)
+ {
+     FIXME("stub!\n");
+@@ -565,7 +617,14 @@ int WINAPI ADL_Display_DisplayMapConfig_Get(int adapter_index, int *display_map_
+             adapter_index, display_map_count, display_maps, display_target_count,
+             display_targets, options);
+ 
+-    return ADL_ERR;
++    return ADL_ERR_NOT_SUPPORTED;
++}
++
++int WINAPI ADL2_Display_DisplayMapConfig_Get(ADL_CONTEXT_HANDLE context, int adapter_index, int *display_map_count, ADLDisplayMap **display_maps,
++        int *display_target_count, ADLDisplayTarget **display_targets, int options)
++{
++    FIXME("adapter_index %d, stub!\n", adapter_index);
++    return ADL_Display_DisplayMapConfig_Get(adapter_index, display_map_count, display_maps, display_target_count, display_targets, options);
+ }
+ 
+ int WINAPI ADL_Display_EdidData_Get(int adapter_index, int display_index, void* edid_data)
+@@ -574,3 +633,21 @@ int WINAPI ADL_Display_EdidData_Get(int adapter_index, int display_index, void*
+         adapter_index, display_index, edid_data);
+     return ADL_ERR_NOT_SUPPORTED;
+ }
++
++int WINAPI ADL2_Display_Modes_Get(ADL_CONTEXT_HANDLE context, int adapter_index, int display_index, int *num_modes, ADLMode *modes)
++{
++    FIXME("adapter: %d, display: %d, stub!\n", adapter_index, display_index);
++    return ADL_ERR_NOT_SUPPORTED;
++}
++
++int WINAPI ADL2_Display_DDCInfo2_Get(ADL_CONTEXT_HANDLE context, int adapter_index, int display_index, ADLDDCInfo2 *info)
++{
++    FIXME("adapter: %d, display: %d, stub!\n", adapter_index, display_index);
++    return ADL_ERR_NOT_SUPPORTED;
++}
++
++int WINAPI ADL2_Display_FreeSync_Cap(ADL_CONTEXT_HANDLE context, int adapter_index, int display_index, ADLFreeSyncCap *cap)
++{
++    FIXME("adapter: %d, display: %d, stub!\n", adapter_index, display_index);
++    return ADL_ERR_NOT_SUPPORTED;
++}
+\ No newline at end of file
+-- 
+2.39.2 (Apple Git-144)
+
+diff --git a/dlls/atiadlxx/atiadlxx.spec b/dlls/atiadlxx/atiadlxx.spec
+index 752e805a..147f6bad 100644
+--- wine/dlls/atiadlxx/atiadlxx.spec
++++ wine/dlls/atiadlxx/atiadlxx.spec
+@@ -10,17 +10,17 @@
+ @ stub ADL2_AdapterLimitation_Caps
+ @ stub ADL2_AdapterX2_Caps
+ @ stub ADL2_Adapter_AMDAndNonAMDDIsplayClone_Get
+-@ stub ADL2_Adapter_ASICFamilyType_Get
++@ stdcall ADL2_Adapter_ASICFamilyType_Get(long long ptr ptr)
+ @ stub ADL2_Adapter_ASICInfo_Get
+ @ stub ADL2_Adapter_Accessibility_Get
+ @ stub ADL2_Adapter_AceDefaults_Restore
+ @ stub ADL2_Adapter_Active_Get
+ @ stub ADL2_Adapter_Active_Set
+ @ stub ADL2_Adapter_Active_SetPrefer
+-@ stdcall ADL2_Adapter_AdapterInfoX2_Get(ptr ptr)
++@ stdcall ADL2_Adapter_AdapterInfoX2_Get(long ptr)
+ @ stub ADL2_Adapter_AdapterInfoX3_Get
+-@ stub ADL2_Adapter_AdapterInfoX4_Get
+-@ stdcall ADL2_Adapter_AdapterInfo_Get(ptr ptr long)
++@ stdcall ADL2_Adapter_AdapterInfoX4_Get(long long ptr ptr)
++@ stdcall ADL2_Adapter_AdapterInfo_Get(long ptr long)
+ @ stub ADL2_Adapter_AdapterList_Disable
+ @ stub ADL2_Adapter_AdapterLocationPath_Get
+ @ stub ADL2_Adapter_Aspects_Get
+@@ -93,7 +93,7 @@
+ @ stub ADL2_Adapter_LocalDisplayState_Get
+ @ stub ADL2_Adapter_MVPU_Set
+ @ stub ADL2_Adapter_MaxCursorSize_Get
+-@ stub ADL2_Adapter_MemoryInfo2_Get
++@ stdcall ADL2_Adapter_MemoryInfo2_Get(long long ptr)
+ @ stdcall ADL2_Adapter_MemoryInfo_Get(ptr long ptr)
+ @ stub ADL2_Adapter_MirabilisSupport_Get
+ @ stub ADL2_Adapter_ModeSwitch
+diff --git a/dlls/atiadlxx/atiadlxx_main.c b/dlls/atiadlxx/atiadlxx_main.c
+index 3018336c..5d35aff2 100644
+--- wine/dlls/atiadlxx/atiadlxx_main.c
++++ wine/dlls/atiadlxx/atiadlxx_main.c
+@@ -104,6 +104,26 @@ typedef struct ADLAdapterInfo {
+     int iOSDisplayIndex;
+ } ADLAdapterInfo, *LPADLAdapterInfo;
+ 
++typedef struct ADLAdapterInfoX2 { //Matches ADLAdapterInfo until iInfoMask
++    int iSize;
++    int iAdapterIndex;
++    char strUDID[ADL_MAX_PATH];
++    int iBusNumber;
++    int iDeviceNumber;
++    int iFunctionNumber;
++    int iVendorID;
++    char strAdapterName[ADL_MAX_PATH];
++    char strDisplayName[ADL_MAX_PATH];
++    int iPresent;
++    int iExist;
++    char strDriverPath[ADL_MAX_PATH];
++    char strDriverPathExt[ADL_MAX_PATH];
++    char strPNPString[ADL_MAX_PATH];
++    int iOSDisplayIndex;
++    int iInfoMask;
++    int iInfoValue;
++} ADLAdapterInfoX2, *LPADLAdapterInfoX2;
++
+ typedef struct ADLDisplayID
+ {
+     int iDisplayLogicalIndex;
+@@ -145,6 +165,16 @@ typedef struct ADLMemoryInfo
+     long long iMemoryBandwidth;
+ } ADLMemoryInfo, *LPADLMemoryInfo;
+ 
++typedef struct ADLMemoryInfo2
++{
++    long long iHyperMemorySize;
++    long long iInvisibleMemorySize;
++    long long iMemoryBandwidth;
++    long long iMemorySize;
++    long long iVisibleMemorySize;
++    char strMemoryType[ADL_MAX_PATH];
++} ADLMemoryInfo2, *LPADLMemoryInfo2;
++
+ typedef struct ADLDisplayTarget
+ {
+     ADLDisplayID displayID;
+@@ -331,14 +361,37 @@ int WINAPI ADL2_Display_EdidData_Get(int adapter_index, int display_index, void*
+     return ADL_ERR_NOT_SUPPORTED;
+ }
+ 
+-int WINAPI ADL2_Adapter_AdapterInfoX2_Get(ADL_CONTEXT_HANDLE* ptr, ADLAdapterInfo **adapters)
++int WINAPI ADL2_Adapter_AdapterInfoX2_Get(ADL_CONTEXT_HANDLE handle, ADLAdapterInfo **adapters)
+ {
+     FIXME("stub!\n");
+     *adapters = (ADLAdapterInfo*)adl_malloc(sizeof(ADLAdapterInfo) * 1);
+     return ADL_Adapter_AdapterInfo_Get(*adapters, sizeof(ADLAdapterInfo) * 1);
+ }
+ 
+-int WINAPI ADL2_Adapter_AdapterInfo_Get(ADL_CONTEXT_HANDLE* ptr, ADLAdapterInfo *adapters, int bufferSize)
++int WINAPI ADL2_Adapter_AdapterInfoX4_Get(ADL_CONTEXT_HANDLE handle, int adapter_index, int *num_adapters, ADLAdapterInfoX2 **info)
++{
++    int status;
++    FIXME("adapter: %u, stub!\n", adapter_index);
++    if (adapter_index == -1)
++    {
++        adapter_index = 0;
++    }
++    if (num_adapters)
++    {
++        *num_adapters = 1;
++    }
++    *info = (ADLAdapterInfoX2*)adl_malloc(sizeof(ADLAdapterInfoX2) * 1);
++    memset(*info, 0, sizeof(ADLAdapterInfoX2));
++    status = ADL_Adapter_AdapterInfo_Get(*info, sizeof(ADLAdapterInfo));
++    if (status == ADL_OK)
++    {
++        info[0]->iInfoMask = 1; 
++        info[0]->iInfoValue = 1;
++    }
++    return status;
++}
++
++int WINAPI ADL2_Adapter_AdapterInfo_Get(ADL_CONTEXT_HANDLE handle, ADLAdapterInfo *adapters, int bufferSize)
+ {
+     ADLAdapterInfo adapterInfo;
+     TRACE("stub!");
+@@ -473,6 +526,12 @@ int WINAPI ADL_Adapter_ASICFamilyType_Get(int adapter_index, int *asic_type, int
+     return ADL_OK;
+ }
+ 
++int WINAPI ADL2_Adapter_ASICFamilyType_Get(ADL_CONTEXT_HANDLE handle, int adapter_index, int *asic_types, int *valids)
++{
++    FIXME("adapter_index: %u, stub!\n", adapter_index);
++    return ADL_Adapter_ASICFamilyType_Get(adapter_index, asic_types, valids);
++}
++
+ static int get_max_clock(const char *clock, int default_value)
+ {
+     char path[MAX_PATH], line[256];
+@@ -573,6 +632,25 @@ int WINAPI ADL2_Adapter_MemoryInfo_Get(ADL_CONTEXT_HANDLE context, int adapter_i
+     return ADL_Adapter_MemoryInfo_Get(adapter_index, mem_info);
+ }
+ 
++int WINAPI ADL2_Adapter_MemoryInfo2_Get(ADL_CONTEXT_HANDLE context, int adapter_index, ADLMemoryInfo2 *mem_info)
++{
++    ADLMemoryInfo meminfo1;
++    int status;
++    FIXME("adapter %d, stub!\n", adapter_index);
++    
++    status = ADL2_Adapter_MemoryInfo_Get(context, adapter_index, &meminfo1);
++    if (status == ADL_OK)
++    {
++        mem_info->iHyperMemorySize = 0;
++        mem_info->iInvisibleMemorySize = 0;
++        mem_info->iMemoryBandwidth = meminfo1.iMemoryBandwidth;
++        mem_info->iMemorySize = meminfo1.iMemorySize;
++        mem_info->iVisibleMemorySize = mem_info->iMemorySize;
++        memcpy(mem_info->strMemoryType, meminfo1.strMemoryType, ADL_MAX_PATH);
++    }
++    return status;
++}
++
+ int WINAPI ADL_Adapter_Primary_Get(int* adapter_index)
+ {
+     FIXME("stub!\n");
+-- 
+2.39.2 (Apple Git-144)
+
+diff --git a/dlls/atiadlxx/atiadlxx.spec b/dlls/atiadlxx/atiadlxx.spec
+index 147f6bad..222fb744 100644
+--- wine/dlls/atiadlxx/atiadlxx.spec
++++ wine/dlls/atiadlxx/atiadlxx.spec
+@@ -464,7 +464,7 @@
+ @ stub ADL2_Overdrive5_FanSpeedToDefault_Set
+ @ stub ADL2_Overdrive5_FanSpeed_Get
+ @ stub ADL2_Overdrive5_FanSpeed_Set
+-@ stub ADL2_Overdrive5_ODParameters_Get
++@ stdcall ADL2_Overdrive5_ODParameters_Get(ptr long ptr)
+ @ stub ADL2_Overdrive5_ODPerformanceLevels_Get
+ @ stub ADL2_Overdrive5_ODPerformanceLevels_Set
+ @ stub ADL2_Overdrive5_PowerControlAbsValue_Caps
+@@ -997,7 +997,7 @@
+ @ stub ADL_Overdrive5_FanSpeedToDefault_Set
+ @ stub ADL_Overdrive5_FanSpeed_Get
+ @ stub ADL_Overdrive5_FanSpeed_Set
+-@ stub ADL_Overdrive5_ODParameters_Get
++@ stdcall ADL_Overdrive5_ODParameters_Get(long ptr)
+ @ stub ADL_Overdrive5_ODPerformanceLevels_Get
+ @ stub ADL_Overdrive5_ODPerformanceLevels_Set
+ @ stub ADL_Overdrive5_PowerControlAbsValue_Caps
+diff --git a/dlls/atiadlxx/atiadlxx_main.c b/dlls/atiadlxx/atiadlxx_main.c
+index d5f8a1b4..9f887387 100644
+--- wine/dlls/atiadlxx/atiadlxx_main.c
++++ wine/dlls/atiadlxx/atiadlxx_main.c
+@@ -227,6 +227,25 @@ typedef struct ADLGraphicInfoCore
+     int iReserved[11];
+ } ADLGraphicInfoCore, *LPADLGraphicInfoCore;
+ 
++typedef struct ADLODParameterRange
++{
++   int iMin;
++   int iMax;
++   int iStep;
++} ADLODParameterRange;
++  
++typedef struct ADLODParameters
++{
++   int iSize;
++   int iNumberOfPerformanceLevels;
++   int iActivityReportingSupported;
++   int iDiscretePerformanceLevels;
++   int iReserved;
++   ADLODParameterRange sEngineClock;
++   ADLODParameterRange sMemoryClock;
++   ADLODParameterRange sVddc;
++} ADLODParameters;
++
+ static const ADLVersionsInfo version = {
+     "22.20.19.16-221003a-384125E-AMD-Software-Adrenalin-Edition",
+     "",
+@@ -720,4 +739,14 @@ int WINAPI ADL2_Display_FreeSync_Cap(ADL_CONTEXT_HANDLE context, int adapter_ind
+ {
+     FIXME("adapter: %d, display: %d, stub!\n", adapter_index, display_index);
+     return ADL_ERR_NOT_SUPPORTED;
+-}
+\ No newline at end of file
++}
++
++int WINAPI ADL_Overdrive5_ODParameters_Get(int iAdapterIndex, ADLODParameters *lpOdParameters)
++{
++    return ADL_ERR_NOT_SUPPORTED;
++}
++
++int WINAPI ADL2_Overdrive5_ODParameters_Get(ADL_CONTEXT_HANDLE context, int iAdapterIndex, ADLODParameters *lpOdParameters)
++{
++    return ADL_ERR_NOT_SUPPORTED;
++}

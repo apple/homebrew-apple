@@ -1,0 +1,34 @@
+name: brew pr-pull
+on:
+  pull_request_target:
+    types:
+      - labeled
+jobs:
+  pr-pull:
+    if: contains(github.event.pull_request.labels.*.name, 'pr-pull')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Set up git
+        uses: Homebrew/actions/git-user-config@master
+
+      - name: Pull bottles
+        env:
+          HOMEBREW_NO_INSTALL_FROM_API: 1
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: brew pr-pull --debug --tap=$GITHUB_REPOSITORY $PULL_REQUEST
+
+      - name: Push commits
+        uses: Homebrew/actions/git-try-push@master
+        with:
+          token: ${{ github.token }}
+          branch: master
+
+      - name: Delete branch
+        if: github.event.pull_request.head.repo.fork == false
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: git push --delete origin $BRANCH

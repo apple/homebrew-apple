@@ -25,7 +25,7 @@ class TarballDownloadStrategy < CurlDownloadStrategy
 end
 
 class GamePortingToolkit < Formula
-  version "1.0.2"
+  version "1.0.3"
   desc "Apple Game Porting Toolkit"
   homepage "https://developer.apple.com/"
   url "https://media.codeweavers.com/pub/crossover/source/crossover-sources-22.1.1.tar.gz", using: TarballDownloadStrategy
@@ -89458,3 +89458,70 @@ index d5f8a1b4..9f887387 100644
 +{
 +    return ADL_ERR_NOT_SUPPORTED;
 +}
+diff --git a/configure b/configure
+index 2d57c7e0..6bf83a38 100755
+--- wine/configure
++++ wine/configure
+@@ -9933,6 +9933,41 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
+ 
+     wine_can_build_preloader=yes
+     WINEPRELOADER_LDFLAGS="-nostartfiles -nodefaultlibs -e _start -ldylib1.o -Wl,-image_base,0x7d400000,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist,-segaddr,WINE_4GB_RESERVE,0x100000000"
++
++        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether the compiler supports -Wl,-ld_classic" >&5
++printf %s "checking whether the compiler supports -Wl,-ld_classic... " >&6; }
++if test ${ac_cv_cflags__Wl__ld_classic+y}
++then :
++  printf %s "(cached) " >&6
++else $as_nop
++  ac_wine_try_cflags_saved=$CFLAGS
++CFLAGS="$CFLAGS -Wl,-ld_classic"
++cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++int main(int argc, char **argv) { return 0; }
++_ACEOF
++if ac_fn_c_try_link "$LINENO"
++then :
++  ac_cv_cflags__Wl__ld_classic=yes
++else $as_nop
++  ac_cv_cflags__Wl__ld_classic=no
++fi
++rm -f core conftest.err conftest.$ac_objext conftest.beam \
++    conftest$ac_exeext conftest.$ac_ext
++CFLAGS=$ac_wine_try_cflags_saved
++fi
++{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_cflags__Wl__ld_classic" >&5
++printf "%s\n" "$ac_cv_cflags__Wl__ld_classic" >&6; }
++if test "x$ac_cv_cflags__Wl__ld_classic" = xyes
++then :
++  ld_classic_flags="-Wl,-ld_classic"
++                     ld_classic_flags="-Wl,-ld_classic"
++fi
++    WINELOADER_LDFLAGS="$ld_classic_flags $WINELOADER_LDFLAGS"
++    WINEPRELOADER_LDFLAGS="$ld_classic_flags $WINEPRELOADER_LDFLAGS"
++    UNIXLDFLAGS="$ld_classic_flags $WINEPRELOADER_LDFLAGS"
++    LDDLLFLAGS="$ld_classic_flags $LDDLLFLAGS"
++
+     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether the compiler supports -Wl,-no_new_main -e _main" >&5
+ printf %s "checking whether the compiler supports -Wl,-no_new_main -e _main... " >&6; }
+ if test ${ac_cv_cflags__Wl__no_new_main__e__main+y}
+diff --git a/configure.ac b/configure.ac
+index 50c50d15..f0dff4aa 100644
+--- wine/configure.ac
++++ wine/configure.ac
+@@ -724,6 +724,16 @@ case $host_os in
+ 
+     wine_can_build_preloader=yes
+     WINEPRELOADER_LDFLAGS="-nostartfiles -nodefaultlibs -e _start -ldylib1.o -Wl,-image_base,0x7d400000,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist,-segaddr,WINE_4GB_RESERVE,0x100000000"
++
++    dnl The linker that ships with Xcode 15 beta 4 doesn’t support -segaddr unless you also pass -ld_classic.
++    WINE_TRY_CFLAGS([-Wl,-ld_classic],
++                    [ld_classic_flags="-Wl,-ld_classic"
++                     ld_classic_flags="-Wl,-ld_classic"])
++    WINELOADER_LDFLAGS="$ld_classic_flags $WINELOADER_LDFLAGS"
++    WINEPRELOADER_LDFLAGS="$ld_classic_flags $WINEPRELOADER_LDFLAGS"
++    UNIXLDFLAGS="$ld_classic_flags $WINEPRELOADER_LDFLAGS"
++    LDDLLFLAGS="$ld_classic_flags $LDDLLFLAGS"
++
+     WINE_TRY_CFLAGS([-Wl,-no_new_main -e _main],
+                     [WINEPRELOADER_LDFLAGS="-Wl,-no_new_main $WINEPRELOADER_LDFLAGS"
+                      WINE_TRY_CFLAGS([-Wl,-no_new_main -e _main -mmacosx-version-min=10.7 -nostartfiles -nodefaultlibs],

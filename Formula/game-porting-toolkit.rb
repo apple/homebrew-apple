@@ -89525,3 +89525,60 @@ index 50c50d15..f0dff4aa 100644
      WINE_TRY_CFLAGS([-Wl,-no_new_main -e _main],
                      [WINEPRELOADER_LDFLAGS="-Wl,-no_new_main $WINEPRELOADER_LDFLAGS"
                       WINE_TRY_CFLAGS([-Wl,-no_new_main -e _main -mmacosx-version-min=10.7 -nostartfiles -nodefaultlibs],
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 970285a..90fedc6 100644
+--- wine/dlls/ntdll/unix/system.c
++++ wine/dlls/ntdll/unix/system.c
+@@ -1031,6 +1031,8 @@ static NTSTATUS create_logical_proc_info(void)
+     size = sizeof(cores_no);
+     if (sysctlbyname("hw.physicalcpu", &cores_no, &size, NULL, 0))
+         cores_no = lcpu_no;
++    else
++        cores_no = MIN(cores_no, lcpu_no);
+ 
+     TRACE("%u logical CPUs from %u physical cores across %u packages\n",
+             lcpu_no, cores_no, pkgs_no);
+@@ -1152,6 +1154,19 @@ static NTSTATUS create_logical_proc_info(void)
+ }
+ #endif
+ 
++#if defined(__APPLE__) && __APPLE__
++unsigned get_cpu_count_override(void)
++{
++    unsigned count = 4;
++    const char* ncpu = getenv("WINENCPU");
++    if (ncpu)
++    {
++        count = atoi(ncpu);
++    }
++    return count;
++}
++#endif
++
+ /******************************************************************
+  *		init_cpu_info
+  *
+@@ -1164,7 +1179,6 @@ void init_cpu_info(void)
+ {
+     NTSTATUS status;
+     long num;
+-
+ #ifdef _SC_NPROCESSORS_ONLN
+     num = sysconf(_SC_NPROCESSORS_ONLN);
+     if (num < 1)
+@@ -1186,6 +1200,15 @@ void init_cpu_info(void)
+     num = 1;
+     FIXME("Detecting the number of processors is not supported.\n");
+ #endif
++#if defined(__APPLE__) && __APPLE__
++    unsigned num_override = get_cpu_count_override();
++    if (num_override != -1)
++    {
++        WARN("Overriding cpu count from %u to %u\n", num, num_override);
++        num = num_override;
++    }
++#endif
++
+     peb->NumberOfProcessors = num;
+     get_cpuinfo( &cpu_info );
+     TRACE( "<- CPU arch %d, level %d, rev %d, features 0x%x\n",

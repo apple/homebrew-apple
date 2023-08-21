@@ -25,7 +25,7 @@ class TarballDownloadStrategy < CurlDownloadStrategy
 end
 
 class GamePortingToolkit < Formula
-  version "1.0.3"
+  version "1.0.4"
   desc "Apple Game Porting Toolkit"
   homepage "https://developer.apple.com/"
   url "https://media.codeweavers.com/pub/crossover/source/crossover-sources-22.1.1.tar.gz", using: TarballDownloadStrategy

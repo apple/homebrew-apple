@@ -25,7 +25,7 @@ class TarballDownloadStrategy < CurlDownloadStrategy
 end
 
 class GamePortingToolkit < Formula
-  version "1.0.4"
+  version "1.1"
   desc "Apple Game Porting Toolkit"
   homepage "https://developer.apple.com/"
   url "https://media.codeweavers.com/pub/crossover/source/crossover-sources-22.1.1.tar.gz", using: TarballDownloadStrategy
@@ -89582,3 +89582,32 @@ index 970285a..90fedc6 100644
      peb->NumberOfProcessors = num;
      get_cpuinfo( &cpu_info );
      TRACE( "<- CPU arch %d, level %d, rev %d, features 0x%x\n",
+diff --git a/dlls/atiadlxx/atiadlxx.spec b/dlls/atiadlxx/atiadlxx.spec
+index 222fb74..d3bcb38 100644
+--- wine/dlls/atiadlxx/atiadlxx.spec
++++ wine/dlls/atiadlxx/atiadlxx.spec
+@@ -433,7 +433,7 @@
+ @ stub ADL2_Graphics_MantleVersion_Get
+ @ stub ADL2_Graphics_Platform_Get
+ @ stdcall ADL2_Graphics_VersionsX2_Get(ptr ptr)
+-@ stub ADL2_Graphics_Versions_Get
++@ stdcall ADL2_Graphics_Versions_Get(ptr ptr)
+ @ stub ADL2_Graphics_VulkanVersion_Get
+ @ stub ADL2_HybridGraphicsGPU_Set
+ @ stub ADL2_MGPUSLS_Status_Set
+diff --git a/dlls/atiadlxx/atiadlxx_main.c b/dlls/atiadlxx/atiadlxx_main.c
+index 9f88738..9e67c74 100644
+--- wine/dlls/atiadlxx/atiadlxx_main.c
++++ wine/dlls/atiadlxx/atiadlxx_main.c
+@@ -316,6 +316,11 @@ int WINAPI ADL_Graphics_Versions_Get(ADLVersionsInfo *ver)
+     return ADL_OK;
+ }
+ 
++int WINAPI ADL2_Graphics_Versions_Get(ADL_CONTEXT_HANDLE *ptr, ADLVersionsInfo *ver)
++{
++    return ADL_Graphics_Versions_Get(ver);
++}
++
+ int WINAPI ADL2_Adapter_Graphic_Core_Info_Get(ADL_CONTEXT_HANDLE *ptr, int iAdapterIndex, LPADLGraphicInfoCore pGraphicsInfo)
+ {
+     FIXME("ptr %p, iAdapterIndex %u, pGraphicsInfo %p\n", ptr, iAdapterIndex, pGraphicsInfo);
